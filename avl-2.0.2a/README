@@ -1,0 +1,61 @@
+Welcome to libavl version 2.0.2, a library in ANSI/ISO C for the
+manipulation of binary trees and balanced binary trees.  libavl is
+written using a literate programming system called TexiWEB.  By way of
+TexiWEB, libavl is as much a textbook on binary trees and balanced
+binary trees as it is a collection of code.
+
+Version 2.0 is a complete rewrite of earlier versions.  It is not
+binary or source compatible with libavl 1.x.  However, if libavl 2.0's
+new features are unnecessary, there is no need to upgrade.  libavl
+1.4.1 does not contain any bugs known to cause incorrect behavior.  It
+is still supported in the sense that if any such bugs are reported,
+they will be fixed.
+
+The assistance of the community is requested in debugging and
+improving libavl.  Your suggestions and bug reports are appreciated,
+whether related to code or prose.  Exposition, style, spelling,
+punctuation, and grammar are all fair game.  All the code in this
+release has been carefully tested, but unknown bugs may still exist.
+Please check out and proofread libavl and report back any bugs to me
+by email at <blp@gnu.org>.
+
+This release supports the following kinds of trees:
+
+    Plain binary trees:
+	* Binary search trees
+	* AVL trees
+	* Red-black trees
+
+    Threaded binary trees:
+	* Threaded binary search trees
+	* Threaded AVL trees
+	* Threaded red-black trees
+
+    Right-threaded binary trees:
+	* Right-threaded binary search trees
+	* Right-threaded AVL trees
+	* Right-threaded red-black trees
+
+    Binary trees with parent pointers:
+	* Binary search trees with parent pointers
+	* AVL trees with parent pointers
+	* Red-black trees with parent pointers
+
+See INSTALL for advice on where to go from here.  Take a look at NEWS
+for a list of new features.  For features tentatively planned for
+inclusion in future releases of libavl, see ROADMAP.
+
+libavl is licensed under the GNU General Public License (GPL), which
+should be included in this directory in file COPYING.  This is not the
+GNU Lesser General Public License (LGPL).  The choice of the GPL
+instead of the LGPL is quite deliberate.  Please read the license and
+become familiar with its terms.
+
+Please send bug reports and enhancement requests for libavl to Ben
+Pfaff <blp@gnu.org>.
+
+Share and enjoy!
+
+Local variables:
+mode: text
+End:
