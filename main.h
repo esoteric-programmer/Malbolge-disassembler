@@ -1,7 +1,7 @@
 /*
 
 	This file is part of the Malbolge disassembler.
-	Copyright (C) 2016 Matthias Ernst
+	Copyright (C) 2016 Matthias Lutter
 
 	The Malbolge disassembler is free software: you can redistribute it
 	and/or modify it under the terms of the GNU General Public License
@@ -16,12 +16,12 @@
 	You should have received a copy of the GNU General Public License
 	along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-	E-Mail: info@matthias-ernst.eu
+	E-Mail: matthias@lutter.cc
 
 
 
 	For more Malbolge stuff, please visit
-	<http://www.matthias-ernst.eu/malbolge.html>
+	<https://lutter.cc/>
 
 */
 
@@ -37,8 +37,6 @@ typedef struct VMState {
 	int a,c,d;
 	int memory[59060];
 } VMState;
-
-VMState initial, entry, temp;
 
 
 const int DREG_ACCESS_MOVD     = 0x0001; // value might be replaced by destination label (if no RW access at all)

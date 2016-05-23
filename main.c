@@ -1,7 +1,7 @@
 /*
 
 	This file is part of the Malbolge disassembler.
-	Copyright (C) 2016 Matthias Ernst
+	Copyright (C) 2016 Matthias Lutter
 
 	The Malbolge disassembler is free software: you can redistribute it
 	and/or modify it under the terms of the GNU General Public License
@@ -16,24 +16,35 @@
 	You should have received a copy of the GNU General Public License
 	along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-	E-Mail: info@matthias-ernst.eu
+	E-Mail: matthias@lutter.cc
 
 
 
 	For more Malbolge stuff, please visit
-	<http://www.matthias-ernst.eu/malbolge.html>
+	<https://lutter.cc/>
 
 */
+#if defined(_WIN32) || defined(WIN32) || defined(_WIN64) || defined(WIN64)
+#define WINDOWS
+#endif
 
 #include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef WINDOWS
 #include <unistd.h>
+#else
+#include <windows.h>
+#endif
 #include <string.h>
 
 #include "main.h"
 
+#ifndef WINDOWS
 volatile sig_atomic_t sigint_store = 0;
+#else
+volatile int sigint_store = 0;
+#endif
 const char* translation = "5z]&gqtyfr$(we4{WP)H-Zn,[%\\3dL+Q;>U!pJS72FhOA1CB6v^=I_0/8|jsb9m<.TVac`uY*MK'X~xDl}REokN:#?G\"i@";
 int main(int argc, char* argv[]);
 int parse_input_args(int argc, char** argv, char** output_filename, char*** user_input_files,
@@ -51,7 +62,11 @@ void add_dreg_normal_successor(struct AccessAnalysis* accesses, int cell, int su
 void add_dreg_normal_predecessors(struct AccessAnalysis* accesses, int cell, int successor);
 void add_jmp_destination(struct AccessAnalysis* accesses, int cell, int destination);
 void add_movd_destination(struct AccessAnalysis* accesses, int cell, int destination);
+#ifndef WINDOWS
 void sigint_handler(int s);
+#else
+BOOL WINAPI sigint_handler(DWORD signal);
+#endif
 void fprint_instruction(FILE* out_stream, int value, int position);
 void fprint_xlat_cycle(FILE* out_stream, int value, int position);
 
@@ -72,39 +87,50 @@ int main(int argc, char* argv[]) {
 	char* output_filename = 0;
 	char** user_input_files = 0;
 	char* debug_filename = 0;
-	struct VMState initial_state;
-	struct VMState entry_state;
+	struct VMState* initial_state = 0;
+	struct VMState* entry_state = 0;
+	struct AccessAnalysis* accesses = 0;
 	int steps_to_entrypoint = 0;
-	struct AccessAnalysis accesses;
 	struct ConnectedMemoryCells* creg_components = 0;
 	struct ConnectedMemoryCells* dreg_components = 0;
 	int result;
+	FILE* output_file = 0;
+	struct ConnectedMemoryCells* current_creg_component = 0;
+	struct ConnectedMemoryCells* current_dreg_component = 0;
 
-
-	printf("This is the Malbolge disassembler v0.1 by Matthias Ernst.\n");
+	printf("This is the Malbolge disassembler v0.1.1 by Matthias Lutter.\n");
 	if (!parse_input_args(argc, argv,&output_filename,&user_input_files,&debug_filename,&malbolge_file)){
 		print_usage_message(argc>0?argv[0]:0);
 		return 0;
 	}
 
-	result = load_malbolge_program(&initial_state, malbolge_file);
+	initial_state = (VMState*)malloc(sizeof(VMState));
+	entry_state = (VMState*)malloc(sizeof(VMState));
+	accesses = (AccessAnalysis*)malloc(sizeof(AccessAnalysis));
+	
+	if (!initial_state || !entry_state || !accesses) {
+		fprintf(stderr,"Not enough memory.\n");
+		return 1;
+	}
+
+	result = load_malbolge_program(initial_state, malbolge_file);
 	if (result != 0) {
 		return result;
 	}
-	result = find_entrypoint(&entry_state, &steps_to_entrypoint, &initial_state);
+	result = find_entrypoint(entry_state, &steps_to_entrypoint, initial_state);
 	if (result != 0) {
 		return result;
 	}
-	result = interactive_access_analysis(&accesses, &entry_state);
+	result = interactive_access_analysis(accesses, entry_state);
 	if (result != 0) {
 		return result;
 	}
-	result = optimize_entrypoint(&entry_state, &steps_to_entrypoint, &accesses, &initial_state);
+	result = optimize_entrypoint(entry_state, &steps_to_entrypoint, accesses, initial_state);
 	if (result != 0) {
 		return result;
 	}
 
-	result = extract_codeblocks(&creg_components, &dreg_components, &accesses, &entry_state);
+	result = extract_codeblocks(&creg_components, &dreg_components, accesses, entry_state);
 	if (result != 0) {
 		return result;
 	}
@@ -119,19 +145,22 @@ int main(int argc, char* argv[]) {
 	// TODO: generate HeLL-code from creg_components, dreg_components, and initial A-value:
 	// TODO: output blocks; regard fixed offsets, entry state: ENTRY as well as initial A register value
 	
-	FILE* output_file = fopen(output_filename, "w");
+	output_file = fopen(output_filename, "w");
 	if (!output_file) {
 		fprintf(stderr,"Cannot write to file: %s",output_filename);
 	}
-	struct ConnectedMemoryCells* current_creg_component = creg_components;
+	current_creg_component = creg_components;
 	fprintf(output_file,".CODE\n");
-	if (accesses.a_register_matters) {
+	if (accesses->a_register_matters) {
 		fprintf(output_file,"INIT_A:\n\tRot\n\tMovD\n\tJmp\n\n");
 	}
 		
 	while (current_creg_component->cells) {
 		int last_executed_address = -2;
 		struct avl_traverser it;
+		int start_index = 0;
+		int* c_pos;
+		int ln_break_offset = 0;
 		// the ordered AVL tree may break our codeblock / datablock on overflow (59048 -> 0)
 		// this is fixed by the following workaround:
 		// the extract_codeblocks methods detects these cases and sets the offset to be fixed.
@@ -155,11 +184,11 @@ int main(int argc, char* argv[]) {
 				tmp_val = 0;
 			}
 		}
-		int start_index = tmp_val;
-		int* c_pos;
+		start_index = tmp_val;
 		avl_t_init(&it, current_creg_component->cells);
-		int ln_break_offset = 0;
 		while (1) {
+			int set_label = 0;
+			int output_command = 0;
 			if (tmp_val) {
 				tmp_val++;
 				if (tmp_val > 59048) {
@@ -177,9 +206,7 @@ int main(int argc, char* argv[]) {
 					break;
 				}
 			}
-			int set_label = 0;
-			int output_command = 0;
-			if (accesses.memory[*c_pos].access & CREG_EXECUTED) {
+			if (accesses->memory[*c_pos].access & CREG_EXECUTED) {
 				output_command = 1;
 				if ((last_executed_address + 1)%59049 != *c_pos) {
 					// set label, set offset if necessary
@@ -194,7 +221,7 @@ int main(int argc, char* argv[]) {
 				}
 				last_executed_address = *c_pos;
 			}
-			if (accesses.memory[*c_pos].access & CREG_REACHED_BY_JMP) {
+			if (accesses->memory[*c_pos].access & CREG_REACHED_BY_JMP) {
 				// set label
 				set_label = 1;
 			}
@@ -204,10 +231,10 @@ int main(int argc, char* argv[]) {
 			if (output_command) {
 				fprintf(output_file,"\t");
 				// command 2 cycle
-				if (accesses.memory[*c_pos].access & CREG_TRANSLATED) {
-					fprint_xlat_cycle(output_file, entry_state.memory[*c_pos], *c_pos);
+				if (accesses->memory[*c_pos].access & CREG_TRANSLATED) {
+					fprint_xlat_cycle(output_file, entry_state->memory[*c_pos], *c_pos);
 				}else{
-					fprint_instruction(output_file, entry_state.memory[*c_pos], *c_pos);
+					fprint_instruction(output_file, entry_state->memory[*c_pos], *c_pos);
 				}
 				fprintf(output_file,"\n");
 			}
@@ -216,20 +243,20 @@ int main(int argc, char* argv[]) {
 		fprintf(output_file, "\n");
 		current_creg_component++;
 	}
-	struct ConnectedMemoryCells* current_dreg_component = dreg_components;
+	current_dreg_component = dreg_components;
 	fprintf(output_file,".DATA\n");
-	if (accesses.a_register_matters) {
-		fprintf(output_file,"ENTRY:\n\tINIT_A %d<<1\n\tORIGINAL_ENTRY\n\n", entry_state.a);
+	if (accesses->a_register_matters) {
+		fprintf(output_file,"ENTRY:\n\tINIT_A %d<<1\n\tORIGINAL_ENTRY\n\n", entry_state->a);
 	}
 	while (current_dreg_component->cells) {
 	
 		int last_output_address = -1;
 		struct avl_traverser it;
+		int* d_pos = 0;
 		// the ordered AVL tree may break our codeblock / datablock on overflow (59048 -> 0)
 		// this is partially fixed by the following workaround:
 		// the extract_codeblocks methods detects these cases and sets the offset to be fixed.
 		avl_t_init(&it, current_dreg_component->cells);
-		int* d_pos;
 		while ((d_pos = (int*)avl_t_next(&it))) {
 			int set_label = 0;
 			int set_code_label = 0;
@@ -247,10 +274,10 @@ int main(int argc, char* argv[]) {
 					fprintf(output_file,"\t?-\n");
 				}
 			}
-			if (accesses.memory[*d_pos].access & DREG_REACHED_BY_MOVD) {
+			if (accesses->memory[*d_pos].access & DREG_REACHED_BY_MOVD) {
 				set_label = 1;
 			}
-			if (accesses.memory[*d_pos].access & CREG_REACHED_BY_JMP) {
+			if (accesses->memory[*d_pos].access & CREG_REACHED_BY_JMP) {
 				set_code_label = 1;
 			}
 			
@@ -262,8 +289,8 @@ int main(int argc, char* argv[]) {
 				fprintf(output_file,".OFFSET %d\n", *d_pos);
 			}
 			// if at entry position:
-			if (*d_pos == entry_state.d) {
-				if (accesses.a_register_matters) {
+			if (*d_pos == entry_state->d) {
+				if (accesses->a_register_matters) {
 					fprintf(output_file,"ORIGINAL_ENTRY:\n");
 				}else{
 					fprintf(output_file,"ENTRY:\n");
@@ -278,33 +305,33 @@ int main(int argc, char* argv[]) {
 
 			fprintf(output_file,"\t");
 			// print data word: LABEL or CONSTANT
-			if (accesses.memory[*d_pos].access & DREG_ACCESS_RW) {
+			if (accesses->memory[*d_pos].access & DREG_ACCESS_RW) {
 				// CONSTANT
-				if (entry_state.memory[*d_pos] == 0) {
+				if (entry_state->memory[*d_pos] == 0) {
 					fprintf(output_file,"C0");
-				}else if (entry_state.memory[*d_pos] == 59048/2) {
+				}else if (entry_state->memory[*d_pos] == 59048/2) {
 					fprintf(output_file,"C1");
-				}else if (entry_state.memory[*d_pos] == 59048-2) {
+				}else if (entry_state->memory[*d_pos] == 59048-2) {
 					fprintf(output_file,"C20");
-				}else if (entry_state.memory[*d_pos] == 59048-1) {
+				}else if (entry_state->memory[*d_pos] == 59048-1) {
 					fprintf(output_file,"C21");
-				}else if (entry_state.memory[*d_pos] == 59048) {
+				}else if (entry_state->memory[*d_pos] == 59048) {
 					fprintf(output_file,"C2");
-				}else if (entry_state.memory[*d_pos] == '\n') {
+				}else if (entry_state->memory[*d_pos] == '\n') {
 					fprintf(output_file,"'\\n'");
-				}else if (entry_state.memory[*d_pos] >= 32 && entry_state.memory[*d_pos] <= 126) {
-					fprintf(output_file,"'%c'",(char)entry_state.memory[*d_pos]);
+				}else if (entry_state->memory[*d_pos] >= 32 && entry_state->memory[*d_pos] <= 126) {
+					fprintf(output_file,"'%c'",(char)entry_state->memory[*d_pos]);
 				}else{
 					// TODO: as trinary number
-					fprintf(output_file,"%d",entry_state.memory[*d_pos]);
+					fprintf(output_file,"%d",entry_state->memory[*d_pos]);
 				}
-			}else if (accesses.memory[*d_pos].access & DREG_ACCESS_JUMP) {
+			}else if (accesses->memory[*d_pos].access & DREG_ACCESS_JUMP) {
 				// CODE LABEL
-				fprintf(output_file,"CODE_%d",entry_state.memory[*d_pos]+1);
-			}else if (accesses.memory[*d_pos].access & DREG_ACCESS_MOVD) {
+				fprintf(output_file,"CODE_%d",entry_state->memory[*d_pos]+1);
+			}else if (accesses->memory[*d_pos].access & DREG_ACCESS_MOVD) {
 				// DATA LABEL
-				fprintf(output_file,"DATA_%d",entry_state.memory[*d_pos]+1);
-			}else if (accesses.memory[*d_pos].access & DREG_REACHED_BY_MOVD){
+				fprintf(output_file,"DATA_%d",entry_state->memory[*d_pos]+1);
+			}else if (accesses->memory[*d_pos].access & DREG_REACHED_BY_MOVD){
 				// value does not matter, but cell must have a label, therefore must be "?" instead of "?-"
 				fprintf(output_file,"?");
 			}else{
@@ -327,7 +354,13 @@ int main(int argc, char* argv[]) {
 	printf(" done.\n");
 
 
-	free_access_analysis(&accesses);
+	free_access_analysis(accesses);
+	free(accesses);
+	accesses = 0;
+	free(entry_state);
+	entry_state = 0;
+	free(initial_state);
+	initial_state = 0;
 	return 0;
 }
 
@@ -381,15 +414,17 @@ int is_nop(int value, int position) {
 
 void fprint_xlat_cycle(FILE* out_stream, int value, int position) {
 
+	int tmp = 0;
+	int cycle_len = 0;
+	int pure_nop_cycle = 1;
+
 	if (value < 33 || value > 126) {
 		fprintf(out_stream,"Invalid");
 		return;
 	}
 	value -= 33;
 	
-	int tmp = value;
-	int cycle_len = 0;
-	int pure_nop_cycle = 1;
+	tmp = value;
 	do {
 		if (!is_nop(tmp+33,position)) {
 			pure_nop_cycle = 0;
@@ -557,14 +592,15 @@ unsigned int rotate_r(unsigned int d){
 
 
 int load_malbolge_program(struct VMState* initial_state, const char* malbolge_file) {
+	unsigned int result;
+	FILE* file = 0;
+	
 	if (!initial_state || !malbolge_file) {
 		return 1;
 	}
 
 	printf("Loading Malbolge program...");
 	fflush(stdout);
-	unsigned int result;
-	FILE* file;
 
 	file = fopen(malbolge_file,"rb");
 	if (file == NULL) {
@@ -628,38 +664,45 @@ int load_malbolge_program(struct VMState* initial_state, const char* malbolge_fi
 
 
 int find_entrypoint(struct VMState* entry_state, int* steps_to_entrypoint, const struct VMState* initial_state) {
-	struct VMState tmp_state;
+	struct VMState* tmp_state = 0;
+	struct BreakCondition break_on = {0, 0, MALBOLGE_IN | MALBOLGE_OUT};
+	int steps = 0;
 	if (!initial_state) {
+		return 1;
+	}
+	tmp_state = (VMState*)malloc(sizeof(VMState));
+	if (!tmp_state) {
+		fprintf(stderr,"Not enough memory.\n");
 		return 1;
 	}
 	printf("\nMalbolge disassembler tries to find the entry point...");
 	fflush(stdout);
-	copy_state(&tmp_state,initial_state);
+	copy_state(tmp_state,initial_state);
 
-	struct BreakCondition break_on = {0, 0, MALBOLGE_IN | MALBOLGE_OUT};
-	int steps = 0;
 	// TODO: prevent from infinite loop; maybe set a maximum number of steps and ask what to do whenever the maximum number is reached
-	execute(&tmp_state, 0, 0, break_on, &steps, 0, 0, 0);
+	execute(tmp_state, 0, 0, break_on, &steps, 0, 0, 0);
 	// execute until entry point (which is last JMP before first IN/OUT/HLT command)
-	copy_state(&tmp_state,initial_state);
+	copy_state(tmp_state,initial_state);
 	break_on.maximal_steps = steps;
 	break_on.on_cseg_outside_analysis = 0;
 	break_on.command_mask = 0;
 	if (steps > 0) {
-		execute(&tmp_state, 0, 0, break_on, 0, 0, 0, 0);
+		execute(tmp_state, 0, 0, break_on, 0, 0, 0, 0);
 	}
-	if (!(tmp_state.memory[tmp_state.c] >= 33 && tmp_state.memory[tmp_state.c] <= 126 && (tmp_state.memory[tmp_state.c]+tmp_state.c)%94 == 4)) {
+	if (!(tmp_state->memory[tmp_state->c] >= 33 && tmp_state->memory[tmp_state->c] <= 126 && (tmp_state->memory[tmp_state->c]+tmp_state->c)%94 == 4)) {
 		// no JMP command at entry point position
 		printf("\n");
 		fprintf(stderr,"Failed to find the entry point.\n");
+		free(tmp_state);
 		return 1; // failed to find entry point
 	}
 	if (steps_to_entrypoint) {
 		*steps_to_entrypoint = steps;
 	}
 	if (entry_state) {
-		copy_state(entry_state,&tmp_state);
+		copy_state(entry_state,tmp_state);
 	}
+	free(tmp_state);
 	printf(" done.\nEntry point found at step %d.\n",*steps_to_entrypoint);
 	return 0;
 }
@@ -667,7 +710,14 @@ int find_entrypoint(struct VMState* entry_state, int* steps_to_entrypoint, const
 
 
 int interactive_access_analysis(struct AccessAnalysis* accesses, const struct VMState* entry_state) {
+	int action = 0;
+	struct VMState* tmp_state = 0;
 	if (!entry_state || !accesses) {
+		return 1;
+	}
+	tmp_state = (VMState*)malloc(sizeof(VMState));
+	if (!tmp_state) {
+		fprintf(stderr,"Not enough memory.\n");
 		return 1;
 	}
 	// ask user for help to generate different runs of the Malbolge program
@@ -690,21 +740,27 @@ int interactive_access_analysis(struct AccessAnalysis* accesses, const struct VM
 		}
 	}while(1);
 
+#ifndef WINDOWS
 	struct sigaction sigIntHandler, oldSigIntHandler;
 	sigIntHandler.sa_handler = sigint_handler;
 	sigemptyset(&sigIntHandler.sa_mask);
 	sigIntHandler.sa_flags = 0;
 	sigaction(SIGINT, &sigIntHandler, &oldSigIntHandler);
-	int action = 0;
+#else
+    if (!SetConsoleCtrlHandler(sigint_handler, TRUE)) {
+        fprintf(stderr,"Cannot set CTRL handler.\n"); 
+        return 1;
+    }
+#endif
 	memset(accesses, 0, sizeof(struct AccessAnalysis));
 	do {
 		int interrupted = 0;
-		printf("Running Malbolge program...\n");
-		struct VMState tmp_state;
-		copy_state(&tmp_state,entry_state);
 		struct BreakCondition break_on = {0, 0, 0};
 		struct UserInput input = {0, 0};
-		int steps = execute(&tmp_state, 1, &input, break_on, 0, &interrupted, accesses, 0);
+		int steps = 0;
+		printf("Running Malbolge program...\n");
+		copy_state(tmp_state,entry_state);
+		steps = execute(tmp_state, 1, &input, break_on, 0, &interrupted, accesses, 0);
 		if (steps > accesses->maximal_steps_from_entry_point) {
 			accesses->maximal_steps_from_entry_point = steps;
 		}
@@ -745,7 +801,12 @@ int interactive_access_analysis(struct AccessAnalysis* accesses, const struct VM
 			}
 		}while(1);
 	}while(action);
+#ifndef WINDOWS
 	sigaction(SIGINT, &oldSigIntHandler, 0);
+#else
+	SetConsoleCtrlHandler(sigint_handler, FALSE);
+#endif
+	free(tmp_state);
 	return 0;
 }
 
@@ -758,6 +819,27 @@ int optimize_entrypoint(struct VMState* entry_state, int* steps_to_entrypoint, s
 	// test whether jmp command of entry point lies inside the Malbolge program (accessed as CREG_EXECUTED later)
 	if (accesses->memory[entry_state->c].access & CREG_EXECUTED) {
 		struct BreakCondition break_on;
+		int optimized_entry_steps = 0;
+		struct VMState* optimized_entry_state = 0;
+		struct AccessAnalysis* tmp_accesses = 0;
+		int steps = 0;
+		
+		optimized_entry_state = (VMState*)malloc(sizeof(VMState));
+		tmp_accesses = (AccessAnalysis*)malloc(sizeof(AccessAnalysis));
+	
+		if (!optimized_entry_state || !tmp_accesses) {
+			fprintf(stderr,"Not enough memory.\n");
+			if (optimized_entry_state) {
+				free(optimized_entry_state);
+				optimized_entry_state = 0;
+			}
+			if (tmp_accesses) {
+				free(tmp_accesses);
+				tmp_accesses = 0;
+			}
+			return 1;
+		}
+
 		printf("\nNow Malbolge disassembler tries to find a better entry point.\n");
 		printf("This may take some time. Please wait...");
 		fflush(stdout);
@@ -767,19 +849,15 @@ int optimize_entrypoint(struct VMState* entry_state, int* steps_to_entrypoint, s
 		// Malbolge program: start fresh from file, run at most as many steps as needed to reach the known entry-point
 		// whenever a CSEG-command outside the AccessAnalysis (make a tmp copy!) is executed, set the new optimized entry point at the next JMP behind this value
 		// (or AT this value if it is a JMP instruction)
-		int optimized_entry_steps = 0;
-		struct VMState optimized_entry_state;
-		struct AccessAnalysis tmp_accesses;
-		copy_state(&optimized_entry_state,initial_state);
-		copy_access_analysis(&tmp_accesses, accesses);
+		copy_state(optimized_entry_state,initial_state);
+		copy_access_analysis(tmp_accesses, accesses);
 
-		int steps = 0;
 
 		do {
 			break_on.maximal_steps = *steps_to_entrypoint - optimized_entry_steps;
 			break_on.on_cseg_outside_analysis = 1;
 			break_on.command_mask = 0;
-			steps += execute(&optimized_entry_state, 1, 0, break_on, 0, 0, &tmp_accesses, 1);
+			steps += execute(optimized_entry_state, 1, 0, break_on, 0, 0, tmp_accesses, 1);
 			if (*steps_to_entrypoint <= optimized_entry_steps + steps) {
 				// entry point found!
 				break;
@@ -787,15 +865,15 @@ int optimize_entrypoint(struct VMState* entry_state, int* steps_to_entrypoint, s
 			break_on.maximal_steps = *steps_to_entrypoint - optimized_entry_steps - steps;
 			break_on.on_cseg_outside_analysis = 0;
 			break_on.command_mask = MALBOLGE_JMP;
-			steps += execute(&optimized_entry_state, 1, 0, break_on, 0, 0, 0, 0);
+			steps += execute(optimized_entry_state, 1, 0, break_on, 0, 0, 0, 0);
 			optimized_entry_steps += steps;
 			steps = 0;
 			break_on.maximal_steps = 1;
 			break_on.on_cseg_outside_analysis = 0;
 			break_on.command_mask = 0;
-			steps += execute(&optimized_entry_state, 1, 0, break_on, 0, 0, 0, 0);
+			steps += execute(optimized_entry_state, 1, 0, break_on, 0, 0, 0, 0);
 		}while(1);
-		free_access_analysis(&tmp_accesses);
+		free_access_analysis(tmp_accesses);
 
 		printf(" done.\n");
 
@@ -806,23 +884,25 @@ int optimize_entrypoint(struct VMState* entry_state, int* steps_to_entrypoint, s
 			fflush(stdout);
 			// update acces information
 			// at first: go to new entry point
-			copy_state(&optimized_entry_state,initial_state);
+			copy_state(optimized_entry_state,initial_state);
 			break_on.maximal_steps = optimized_entry_steps;
 			break_on.on_cseg_outside_analysis = 0;
 			break_on.command_mask = 0;
-			execute(&optimized_entry_state, 1, 0, break_on, 0, 0, 0, 0);
+			execute(optimized_entry_state, 1, 0, break_on, 0, 0, 0, 0);
 			// now update access information starting here
-			copy_state(entry_state,&optimized_entry_state);
+			copy_state(entry_state,optimized_entry_state);
 			break_on.maximal_steps = *steps_to_entrypoint - optimized_entry_steps + 1; // +1: the JMP at the old entry point has to be added!
 			break_on.on_cseg_outside_analysis = 0;
 			break_on.command_mask = 0;
-			execute(&optimized_entry_state, 1, 0, break_on, 0, 0, accesses, 0);
+			execute(optimized_entry_state, 1, 0, break_on, 0, 0, accesses, 0);
 			accesses->maximal_steps_from_entry_point += *steps_to_entrypoint - optimized_entry_steps; // update maximal user-steps from entrypoint
 			*steps_to_entrypoint = optimized_entry_steps;
 			printf(" done.\n");
 		}else{
 			printf("No better entry point has been found.\n");
 		}
+		free(optimized_entry_state);
+		free(tmp_accesses);	
 	}else{
 		printf("The entry point seems to be optimal.\n");
 	}
@@ -835,8 +915,19 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 		struct AccessAnalysis* accesses, const struct VMState* entry_state) {
 
 	struct BreakCondition break_on;
+	int i = 0;
+	VMState* tmp_state = 0;
+	struct avl_table* ever_used_memory_cells = 0;
+	int number_creg_components = 0; // to avoid counting its size again and again
+	int number_dreg_components = 0; // to avoid counting its size again and again
 	
 	if (!creg_components || !dreg_components || !accesses) {
+		return 1;
+	}
+	
+	tmp_state = (VMState*)malloc(sizeof(VMState));
+	if (!tmp_state) {
+		fprintf(stderr,"Not enough memory.\n");
 		return 1;
 	}
 	
@@ -846,22 +937,21 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 	// and fix the successor's offset if the cell which points to the successor is modified during execution
 	printf("Malbolge disassembler processes memory access information now.\nPlease wait...");
 	fflush(stdout);
-	int i;
 	for (i=0;i<59049;i++) {
 		if ((accesses->memory[i].access & DREG_ACCESS_RW) && (accesses->memory[i].access & (DREG_ACCESS_JUMP | DREG_ACCESS_MOVD))) {
 			// follow dreg_movd_destinations, dreg_jmp_destinations and set FIXED_OFFSET there.
 			if (accesses->memory[i].dreg_movd_destinations) {
 				struct avl_traverser it;
+				int* movd_dest = 0;
 				avl_t_init(&it, accesses->memory[i].dreg_movd_destinations);
-				int* movd_dest;
 				while ((movd_dest = (int*)avl_t_next(&it))) {
 					accesses->memory[*movd_dest+1].access |= FIXED_OFFSET;
 				}
 			}
 			if (accesses->memory[i].dreg_jmp_destinations) {
 				struct avl_traverser it;
+				int* jmp_dest = 0;
 				avl_t_init(&it, accesses->memory[i].dreg_jmp_destinations);
-				int* jmp_dest;
 				while ((jmp_dest = (int*)avl_t_next(&it))) {
 					accesses->memory[*jmp_dest+1].access |= FIXED_OFFSET;
 				}
@@ -874,26 +964,26 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 	// not necessary at the moment, because entry-point guarantees IN or OUT operation.
 	// But if the entry point-detection is changed, this makes sure that endless loops will not occur here.
 	accesses->a_register_matters = 0;
-	VMState tmp_state;
-	copy_state(&tmp_state,entry_state);
+	copy_state(tmp_state,entry_state);
 	break_on.maximal_steps = accesses->maximal_steps_from_entry_point;
 	break_on.on_cseg_outside_analysis = 0;
 	break_on.command_mask = MALBOLGE_HLT | MALBOLGE_OPR | MALBOLGE_OUT | MALBOLGE_IN | MALBOLGE_ROT;
-	execute(&tmp_state, 0, 0, break_on, 0, 0, 0, 0);
+	execute(tmp_state, 0, 0, break_on, 0, 0, 0, 0);
 	// check whether tmp_state.c points to OUT or OPR.
-	if (tmp_state.memory[tmp_state.c] >= 33 && tmp_state.memory[tmp_state.c] <= 126 &&
-			((tmp_state.memory[tmp_state.c]+tmp_state.c)%94 == 5 || (tmp_state.memory[tmp_state.c]+tmp_state.c)%94 == 62)) {
+	if (tmp_state->memory[tmp_state->c] >= 33 && tmp_state->memory[tmp_state->c] <= 126 &&
+			((tmp_state->memory[tmp_state->c]+tmp_state->c)%94 == 5 || (tmp_state->memory[tmp_state->c]+tmp_state->c)%94 == 62)) {
 		// the A register matters
 		accesses->a_register_matters = 1;
 	}
 
-	// go through access.memory-array and find conneted blocks
+	// go through access->memory-array and find conneted blocks
 
 
 	// extract and store memory cells ever used
-	struct avl_table* ever_used_memory_cells = avl_create(compare_integer, 0, &avl_allocator_default);
+	ever_used_memory_cells = avl_create(compare_integer, 0, &avl_allocator_default);
 	if (!ever_used_memory_cells) {
 		fprintf(stderr,"Cannot allocate memory.\n");
+		free(tmp_state);
 		return 1;
 	}
 	// fill ever_used_memory_cells according to AccessAnalysis.
@@ -902,6 +992,7 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 			int* cell_id = (int*)malloc(sizeof(int));
 			if (!cell_id) {
 				fprintf(stderr,"Cannot allocate memory.\n");
+				free(tmp_state);
 				return 1;
 			}
 			*cell_id = i;
@@ -911,10 +1002,9 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 
 	*creg_components = (struct ConnectedMemoryCells*)malloc(sizeof(struct ConnectedMemoryCells)); // zero-terminated
 	*dreg_components = (struct ConnectedMemoryCells*)malloc(sizeof(struct ConnectedMemoryCells)); // zero-terminated
-	int number_creg_components = 0; // to avoid counting its size again and again
-	int number_dreg_components = 0; // to avoid counting its size again and again
 	if (!*creg_components || !*dreg_components) {
 		fprintf(stderr,"Cannot allocate memory.\n");
+		free(tmp_state);
 		return 1;
 	}
 	memset(*creg_components,0,sizeof(struct ConnectedMemoryCells));
@@ -925,23 +1015,27 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 		//take first cell and build a new connected memory block:
 		struct avl_traverser it;
 		//avl_t_init(&it, ever_used_memory_cells);
+		struct ConnectedMemoryCells current_memory_block;
+		struct avl_table* cells_to_be_added = 0;
 		int* first_cell = (int*)avl_t_first(&it, ever_used_memory_cells);
 		if (!first_cell) {
 			fprintf(stderr,"Error accessing AVL tree.\n");
+			free(tmp_state);
 			return 1;
 		}
 		// initialize new connected memory block
-		struct ConnectedMemoryCells current_memory_block;
 		memset(&current_memory_block, 0, sizeof(ConnectedMemoryCells));
 		current_memory_block.cells = avl_create(compare_integer, 0, &avl_allocator_default);
 		if (!current_memory_block.cells) {
 			fprintf(stderr,"Cannot allocate memory.\n");
+			free(tmp_state);
 			return 1;
 		}
 		// list of elements to be added in future
-		struct avl_table* cells_to_be_added = avl_create(compare_integer, 0, &avl_allocator_default);
+		cells_to_be_added = avl_create(compare_integer, 0, &avl_allocator_default);
 		if (!cells_to_be_added) {
 			fprintf(stderr,"Cannot allocate memory.\n");
+			free(tmp_state);
 			return 1;
 		}
 		// first_cell should be added to current memory block, then it need not be processed for further blocks
@@ -953,6 +1047,7 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 			int* add_cell = (int*)avl_t_first(&it, cells_to_be_added);
 			if (!add_cell) {
 				fprintf(stderr,"Error accessing AVL tree.\n");
+				free(tmp_state);
 				return 1;
 			}
 			// find all successors and predecessors,
@@ -960,6 +1055,7 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 			if (accesses->memory[*add_cell].access & CREG_REACHED_WO_JMP) {
 				// add preceeding cell to cells_to_be_added, delete it from ever_used_memory_cells
 				int prec = (*add_cell) - 1;
+				void* tmp = 0;
 				if (prec < 0) {
 					// underflow; offsets should be fixed.
 					// note that fixing offsets is ot necessary due to the malbolge program itself
@@ -968,7 +1064,7 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 					current_memory_block.fixed_offset = 1;
 					prec = 59048;
 				}
-				void* tmp = avl_delete(ever_used_memory_cells,&prec);
+				tmp = avl_delete(ever_used_memory_cells,&prec);
 				if (tmp) {
 					avl_insert(cells_to_be_added, tmp);
 				}
@@ -976,26 +1072,28 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 			if (accesses->memory[*add_cell].access & CREG_TRANSLATED) {
 				// add succeeding cell to cells_to_be_added, delete it from ever_used_memory_cells
 				int succ = (*add_cell) + 1;
+				void* tmp = 0;
 				if (succ > 59048) {
 					// overflow; offsets should be fixed. (see above)
 					current_memory_block.fixed_offset = 1;
 					succ = 0;
 				}
-				void* tmp = avl_delete(ever_used_memory_cells,&succ);
+				tmp = avl_delete(ever_used_memory_cells,&succ);
 				if (tmp) {
 					avl_insert(cells_to_be_added, tmp);
 				}
 			}
 			// go through dreg_successors_normal_flow
 			if (accesses->memory[*add_cell].dreg_successors_normal_flow) {
-				avl_t_init(&it, accesses->memory[*add_cell].dreg_successors_normal_flow);
 				void* cell = 0;
+				void* tmp = 0;
+				avl_t_init(&it, accesses->memory[*add_cell].dreg_successors_normal_flow);
 				while ((cell = avl_t_next(&it))) {
 					if (*((int*)cell) < *add_cell) {
 						// overflow; offsets should be fixed. (see above)
 						current_memory_block.fixed_offset = 1;
 					}
-					void* tmp = avl_delete(ever_used_memory_cells,cell);
+					tmp = avl_delete(ever_used_memory_cells,cell);
 					if (tmp) {
 						avl_insert(cells_to_be_added, tmp);
 					}
@@ -1003,14 +1101,15 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 			}
 			// go through dreg_predecessors_normal_flow
 			if (accesses->memory[*add_cell].dreg_predecessors_normal_flow) {
-				avl_t_init(&it, accesses->memory[*add_cell].dreg_predecessors_normal_flow);
 				void* cell = 0;
+				void* tmp = 0;
+				avl_t_init(&it, accesses->memory[*add_cell].dreg_predecessors_normal_flow);
 				while ((cell = avl_t_next(&it))) {
 					if (*((int*)cell) > *add_cell) {
 						// underflow; offsets should be fixed. (see above)
 						current_memory_block.fixed_offset = 1;
 					}
-					void* tmp = avl_delete(ever_used_memory_cells,cell);
+					tmp = avl_delete(ever_used_memory_cells,cell);
 					if (tmp) {
 						avl_insert(cells_to_be_added, tmp);
 					}
@@ -1047,6 +1146,7 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 					*dreg_components, sizeof(struct ConnectedMemoryCells)*(number_dreg_components+2)); // zero-terminated
 			if (!tmp) {
 				fprintf(stderr,"Cannot allocate memory.\n");
+				free(tmp_state);
 				return 1;
 			}
 			*dreg_components = tmp;
@@ -1059,6 +1159,7 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 					*creg_components, sizeof(struct ConnectedMemoryCells)*(number_creg_components+2)); // zero-terminated
 			if (!tmp) {
 				fprintf(stderr,"Cannot allocate memory.\n");
+				free(tmp_state);
 				return 1;
 			}
 			*creg_components = tmp;
@@ -1071,12 +1172,15 @@ int extract_codeblocks(struct ConnectedMemoryCells** creg_components, struct Con
 		}
 	}
 	// done.
+	free(tmp_state);
 	printf(" done.\n");
 	return 0;
 }
 
 
 void add_dreg_normal_successor(struct AccessAnalysis* accesses, int cell, int successor) {
+	int* succ = 0;
+	int* old = 0;
 	if (!accesses) {
 		return;
 	}
@@ -1092,14 +1196,14 @@ void add_dreg_normal_successor(struct AccessAnalysis* accesses, int cell, int su
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
-	int* succ = (int*)malloc(sizeof(int));
+	succ = (int*)malloc(sizeof(int));
 	if (succ == 0) {
 		printf("\n");
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
 	*succ = successor;
-	int* old = avl_insert(accesses->memory[cell].dreg_successors_normal_flow, succ);
+	old = avl_insert(accesses->memory[cell].dreg_successors_normal_flow, succ);
 	if (old) {
 		free(succ);
 	}
@@ -1107,6 +1211,8 @@ void add_dreg_normal_successor(struct AccessAnalysis* accesses, int cell, int su
 
 
 void add_dreg_normal_predecessors(struct AccessAnalysis* accesses, int cell, int predecessor) {
+	int* pred = 0;
+	int* old = 0;
 	if (!accesses) {
 		return;
 	}
@@ -1122,14 +1228,14 @@ void add_dreg_normal_predecessors(struct AccessAnalysis* accesses, int cell, int
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
-	int* pred = (int*)malloc(sizeof(int));
+	pred = (int*)malloc(sizeof(int));
 	if (pred == 0) {
 		printf("\n");
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
 	*pred = predecessor;
-	int* old = avl_insert(accesses->memory[cell].dreg_predecessors_normal_flow, pred);
+	old = avl_insert(accesses->memory[cell].dreg_predecessors_normal_flow, pred);
 	if (old) {
 		free(pred);
 	}
@@ -1138,6 +1244,8 @@ void add_dreg_normal_predecessors(struct AccessAnalysis* accesses, int cell, int
 
 
 void add_jmp_destination(struct AccessAnalysis* accesses, int cell, int destination) {
+	int* old = 0;
+	int* dest = 0;
 	if (!accesses) {
 		return;
 	}
@@ -1153,20 +1261,22 @@ void add_jmp_destination(struct AccessAnalysis* accesses, int cell, int destinat
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
-	int* dest = (int*)malloc(sizeof(int));
+	dest = (int*)malloc(sizeof(int));
 	if (dest == 0) {
 		printf("\n");
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
 	*dest = destination;
-	int* old = avl_insert(accesses->memory[cell].dreg_jmp_destinations, dest);
+	old = avl_insert(accesses->memory[cell].dreg_jmp_destinations, dest);
 	if (old) {
 		free(dest);
 	}
 }
 
 void add_movd_destination(struct AccessAnalysis* accesses, int cell, int destination) {
+	int* dest = 0;
+	int* old = 0;
 	if (!accesses) {
 		return;
 	}
@@ -1182,14 +1292,14 @@ void add_movd_destination(struct AccessAnalysis* accesses, int cell, int destina
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
-	int* dest = (int*)malloc(sizeof(int));
+	dest = (int*)malloc(sizeof(int));
 	if (dest == 0) {
 		printf("\n");
 		fprintf(stderr,"Error: Cannot allocate memory.\n");
 		exit(1);
 	}
 	*dest = destination;
-	int* old = avl_insert(accesses->memory[cell].dreg_movd_destinations, dest);
+	old = avl_insert(accesses->memory[cell].dreg_movd_destinations, dest);
 	if (old) {
 		free(dest);
 	}
@@ -1216,6 +1326,7 @@ int execute(struct VMState* state, int interactive, struct UserInput* input, str
 	got_sigint();
 
 	while (1) {
+		unsigned int instruction = 0;
 		if (got_sigint()) {
 			if (interrupted)
 				*interrupted = 1;
@@ -1229,7 +1340,7 @@ int execute(struct VMState* state, int interactive, struct UserInput* input, str
 				return steps;
 			}
 		}
-		unsigned int instruction = state->memory[state->c];
+		instruction = state->memory[state->c];
 		if (instruction < 33 || instruction > 126) {
 			if (interactive) {
 				fprintf(stderr, "Invalid command 0x%05x at 0x%05x.\n",instruction,state->c);
@@ -1449,12 +1560,21 @@ void copy_state(struct VMState* dest, const struct VMState* src) {
 	memcpy(dest->memory, src->memory, sizeof(int)*59060);
 }
 
+#ifdef WINDOWS
+BOOL WINAPI sigint_handler(int s) {
 
-
+	if (signal == CTRL_C_EVENT) {
+        sigint_store++;
+	}
+    return TRUE;
+}
+#else
 void sigint_handler(int s) {
 	//printf("got sigint\n");
 	sigint_store++;
 }
+#endif
+
 int got_sigint() {
 	if (sigint_store > 0) {
 		sigint_store = 0;

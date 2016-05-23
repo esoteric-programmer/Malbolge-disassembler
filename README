@@ -1,4 +1,4 @@
-Malbolge disassembler by Matthias Ernst.
+Malbolge disassembler by Matthias Lutter.
 
 Contains the AVL tree implementation of libavl by Ben Pfaff (folder avl-2.0.2a).
 
